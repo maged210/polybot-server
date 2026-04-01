@@ -20,6 +20,7 @@
 const WINDOW_SECONDS = 300; // 5 minutes
 const GAMMA_API = "https://gamma-api.polymarket.com";
 const CLOB_API = "https://clob.polymarket.com";
+const { TechnicalAnalysis } = require("./technical-analysis");
 
 const ASSETS = {
   btc: {
@@ -69,6 +70,7 @@ class FiveMinSniper {
 
     this.running = false;
     this.interval = null;
+    this.ta = new TechnicalAnalysis();
 
     // Price tracking per asset
     this.prices = {
@@ -355,27 +357,39 @@ class FiveMinSniper {
       const windowKey = `${asset}-${win.windowStart}`;
       if (this.tradedThisWindow[windowKey]) continue;
 
-      // Check direction
-      const dir = this.getDirection(asset);
-      if (!dir) continue;
+      // Run full technical analysis
+      const ta = await this.ta.analyze(asset);
+      if (!ta || ta.signal === "NEUTRAL") {
+        if (win.elapsed > 250 && win.elapsed < 255) {
+          this.onLog(`5M TA ${asset.toUpperCase()}: NEUTRAL — ${ta?.details?.join(' | ') || 'no data'}`, "info");
+        }
+        continue;
+      }
+
+      // Need at least 50% confidence (3+ indicators agree)
+      if (ta.confidence < 0.5) {
+        this.onLog(`5M TA ${asset.toUpperCase()}: ${ta.signal} but low conf ${(ta.confidence*100).toFixed(0)}% — skipping`, "info");
+        continue;
+      }
 
       // Fetch the market
       const market = await this.fetchMarket(asset, win.windowStart);
       if (!market || !market.tokenIds.up || !market.acceptingOrders) {
         if (win.elapsed > 250 && win.elapsed < 255) {
-          this.onLog(`5M: ${asset.toUpperCase()} market not found or not accepting orders for window ${win.windowStart}`, "warn");
+          this.onLog(`5M: ${asset.toUpperCase()} market not found for window ${win.windowStart}`, "warn");
         }
         continue;
       }
 
       // Check if market price is lagging (our edge)
       const marketProbUp = market.prices.up;
-      const trueProbUp = dir.direction === "UP" ? 0.5 + Math.min(dir.changePct * 5, 0.4) : 0.5 - Math.min(dir.changePct * 5, 0.4);
-      const edge = dir.direction === "UP"
-        ? trueProbUp - marketProbUp
-        : (1 - trueProbUp) - market.prices.down;
+      const trueProb = ta.signal === "UP" ? 0.5 + (ta.confidence * 0.35) : 0.5 - (ta.confidence * 0.35);
+      const edge = ta.signal === "UP"
+        ? trueProb - marketProbUp
+        : (1 - trueProb) - market.prices.down;
 
-      this.onLog(`🔍 5M ${asset.toUpperCase()}: ${dir.direction} ${(dir.changePct).toFixed(3)}% | Market: UP ${(marketProbUp*100).toFixed(0)}% | True est: ${(trueProbUp*100).toFixed(0)}% | Edge: ${(edge*100).toFixed(1)}%`, "ai");
+      this.onLog(`🔍 5M TA ${asset.toUpperCase()}: ${ta.signal} ${(ta.confidence*100).toFixed(0)}% conf | ${ta.details.join(' | ')}`, "ai");
+      this.onLog(`   Market: UP ${(marketProbUp*100).toFixed(0)}% | TA est: ${(trueProb*100).toFixed(0)}% | Edge: ${(edge*100).toFixed(1)}% | RSI ${ta.indicators.rsi} | MACD ${ta.indicators.macd.crossover}`, "ai");
 
       // Only trade if there's meaningful edge
       if (edge < 0.05) {
@@ -388,8 +402,9 @@ class FiveMinSniper {
       this.stats.tradesPlaced++;
       this.stats.hourlyTrades++;
 
-      const result = await this.placeOrder(market, dir.direction, SNIPER_CONFIG.BET_SIZE);
+      const result = await this.placeOrder(market, ta.signal, SNIPER_CONFIG.BET_SIZE);
       if (result) {
+        result.ta = ta; // Attach TA data to trade
         this.onTrade(result);
       }
     }

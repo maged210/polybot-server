@@ -26,6 +26,8 @@ const fetch = (...args) => import("node-fetch").then(({ default: f }) => f(...ar
 const { ApexEngine, APEX_CONFIG } = require("./apex-strategy");
 const { NewsEngine } = require("./news-engine");
 const { FiveMinSniper } = require("./five-min-sniper");
+const { TechnicalAnalysis } = require("./technical-analysis");
+const taEngine = new TechnicalAnalysis();
 
 const app = express();
 app.use(cors());
@@ -1283,6 +1285,14 @@ app.post("/api/sniper/stop", (req, res) => {
 
 app.get("/api/sniper/status", (req, res) => {
   res.json(sniper ? sniper.getStatus() : { running: false });
+});
+
+// Technical Analysis endpoint
+app.get("/api/ta/:asset", async (req, res) => {
+  const asset = req.params.asset;
+  if (!["btc", "eth"].includes(asset)) return res.status(400).json({ error: "Use btc or eth" });
+  const analysis = await taEngine.analyze(asset);
+  res.json(analysis);
 });
 
 // Mode switch
