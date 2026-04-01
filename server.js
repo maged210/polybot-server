@@ -738,40 +738,70 @@ async function executeTrade(signal, analysis) {
   // ── LIVE EXECUTION ──
   if (state.mode === "live" && state.isAuthenticated && state.clobClient) {
     try {
+      // Parse token IDs properly
       const tokenIdx = side === "YES" ? 0 : 1;
       let tokenId = null;
       try {
-        const clobIds = typeof market.clobTokenIds === "string" ? JSON.parse(market.clobTokenIds) : market.clobTokenIds;
-        tokenId = clobIds?.[tokenIdx];
-      } catch {}
-      if (!tokenId) throw new Error("No token ID for this market");
+        let clobIds = market.clobTokenIds;
+        if (typeof clobIds === "string") {
+          // Handle double-encoded JSON: "[\"abc\",\"def\"]"
+          clobIds = JSON.parse(clobIds);
+          if (typeof clobIds === "string") clobIds = JSON.parse(clobIds); // double parse
+        }
+        tokenId = Array.isArray(clobIds) ? clobIds[tokenIdx] : null;
+      } catch (parseErr) {
+        log(`Token ID parse error: ${parseErr.message} | raw: ${JSON.stringify(market.clobTokenIds).slice(0, 100)}`, "error");
+      }
 
-      const tickSize = market.orderPriceMinTickSize || market.minimum_tick_size || "0.01";
-      const negRisk = market.negRisk || market.neg_risk || false;
+      if (!tokenId) {
+        throw new Error(`No token ID found. clobTokenIds: ${JSON.stringify(market.clobTokenIds).slice(0, 80)}`);
+      }
 
-      log(`LIVE ORDER: ${side} $${betAmount.toFixed(2)} @ ${price.toFixed(3)} on ${tokenId.slice(0, 20)}...`, "live");
+      // Get market parameters
+      const tickSize = market.orderPriceMinTickSize || "0.01";
+      const negRisk = market.negRisk === true || market.neg_risk === true;
 
+      // Round price to tick size
+      const tick = parseFloat(tickSize);
+      const roundedPrice = Math.round(price / tick) * tick;
+      const finalPrice = Math.max(tick, Math.min(1 - tick, roundedPrice));
+      const size = Math.max(1, Math.floor(betAmount / finalPrice));
+
+      log(`🔴 LIVE ORDER ATTEMPT:`, "live");
+      log(`   Market: ${(market.question || market.slug || "").slice(0, 60)}`, "live");
+      log(`   Side: ${side} | Price: $${finalPrice.toFixed(4)} | Size: ${size} shares | Cost: $${(size * finalPrice).toFixed(2)}`, "live");
+      log(`   Token: ${tokenId.slice(0, 20)}...${tokenId.slice(-8)}`, "live");
+      log(`   Tick: ${tickSize} | NegRisk: ${negRisk}`, "live");
+
+      // Place the order
       const orderResponse = await state.clobClient.createAndPostOrder(
         {
           tokenID: tokenId,
-          price: parseFloat(price.toFixed(2)),
+          price: finalPrice,
           side: "BUY",
-          size: parseFloat((betAmount / price).toFixed(2)),
+          size: size,
         },
-        { tickSize, negRisk },
+        {
+          tickSize: tickSize,
+          negRisk: negRisk,
+        },
         "GTC"
       );
 
-      if (orderResponse && !orderResponse.error) {
-        position.orderId = orderResponse.orderID || orderResponse.id;
+      log(`   CLOB Response: ${JSON.stringify(orderResponse).slice(0, 200)}`, "live");
+
+      if (orderResponse && orderResponse.success !== false && !orderResponse.error) {
+        position.orderId = orderResponse.orderID || orderResponse.id || "submitted";
         position.orderStatus = "SUBMITTED";
-        log(`✓ Order submitted: ${position.orderId}`, "live");
-        await sendTelegram(`🔴 LIVE ORDER PLACED\n${side} $${betAmount.toFixed(2)} @ ${price.toFixed(3)}\nEdge: ${(edge * 100).toFixed(1)}%\nOrder: ${position.orderId}`);
+        log(`✅ LIVE ORDER SUCCESS: ${position.orderId}`, "live");
+        await sendTelegram(`🔴 LIVE ORDER PLACED\n${side} ${size} shares @ $${finalPrice.toFixed(3)}\nCost: $${(size * finalPrice).toFixed(2)}\nEdge: ${(edge * 100).toFixed(1)}%\nMarket: ${(market.question || "").slice(0, 40)}\nOrder: ${position.orderId}`);
       } else {
-        throw new Error(orderResponse?.error || "Unknown order error");
+        const errMsg = orderResponse?.error || orderResponse?.message || JSON.stringify(orderResponse).slice(0, 150);
+        throw new Error(`CLOB rejected: ${errMsg}`);
       }
     } catch (e) {
-      log(`LIVE ORDER FAILED: ${e.message}`, "error");
+      log(`❌ LIVE ORDER FAILED: ${e.message}`, "error");
+      log(`   Full error: ${e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e.message}`, "error");
       await sendTelegram(`❌ ORDER FAILED: ${e.message}`);
       position.mode = "paper";
       position.liveError = e.message;
@@ -1216,6 +1246,119 @@ app.post("/api/mode", (req, res) => {
 app.post("/api/analyze", async (req, res) => {
   const analysis = await analyzeMarket();
   res.json(analysis || { error: "Analysis failed" });
+});
+
+// Test live order — places a tiny $1 order to verify execution works
+app.post("/api/test-order", async (req, res) => {
+  if (!state.isAuthenticated || !state.clobClient) {
+    return res.json({ error: "Not authenticated. Check wallet and CLOB credentials." });
+  }
+
+  const market = state.selectedMarket;
+  if (!market) {
+    return res.json({ error: "No market selected" });
+  }
+
+  const results = { steps: [], market: market.question || market.slug };
+
+  try {
+    // Step 1: Parse token IDs
+    results.steps.push("Parsing token IDs...");
+    let clobIds = market.clobTokenIds;
+    results.rawClobTokenIds = typeof clobIds === "string" ? clobIds.slice(0, 80) : JSON.stringify(clobIds).slice(0, 80);
+
+    if (typeof clobIds === "string") {
+      clobIds = JSON.parse(clobIds);
+      if (typeof clobIds === "string") clobIds = JSON.parse(clobIds);
+    }
+    results.parsedIds = Array.isArray(clobIds) ? clobIds.map(id => id.slice(0, 20) + "...") : "NOT AN ARRAY";
+
+    const tokenId = Array.isArray(clobIds) ? clobIds[0] : null;
+    if (!tokenId) {
+      results.error = "No token ID found after parsing";
+      return res.json(results);
+    }
+    results.steps.push(`Token ID: ${tokenId.slice(0, 20)}...`);
+
+    // Step 2: Get market params
+    const tickSize = market.orderPriceMinTickSize || "0.01";
+    const negRisk = market.negRisk === true || market.neg_risk === true;
+    results.tickSize = tickSize;
+    results.negRisk = negRisk;
+    results.steps.push(`Tick: ${tickSize}, NegRisk: ${negRisk}`);
+
+    // Step 3: Get current price from CLOB
+    results.steps.push("Fetching CLOB price...");
+    try {
+      const priceRes = await fetch(`https://clob.polymarket.com/price?token_id=${tokenId}&side=buy`);
+      if (priceRes.ok) {
+        const priceData = await priceRes.json();
+        results.clobPrice = priceData;
+        results.steps.push(`CLOB price: ${JSON.stringify(priceData)}`);
+      } else {
+        results.steps.push(`CLOB price fetch failed: ${priceRes.status}`);
+      }
+    } catch (e) {
+      results.steps.push(`CLOB price error: ${e.message}`);
+    }
+
+    // Step 4: Try placing a $1 order
+    const tick = parseFloat(tickSize);
+    const buyPrice = 0.50; // Buy at 50 cents — safe middle price
+    const roundedPrice = Math.round(buyPrice / tick) * tick;
+    const size = 2; // 2 shares at $0.50 = $1 total
+
+    results.orderParams = {
+      tokenID: tokenId.slice(0, 20) + "...",
+      price: roundedPrice,
+      side: "BUY",
+      size: size,
+      tickSize: tickSize,
+      negRisk: negRisk,
+    };
+    results.steps.push(`Placing test order: ${size} shares @ $${roundedPrice}...`);
+
+    const orderResponse = await state.clobClient.createAndPostOrder(
+      {
+        tokenID: tokenId,
+        price: roundedPrice,
+        side: "BUY",
+        size: size,
+      },
+      {
+        tickSize: tickSize,
+        negRisk: negRisk,
+      },
+      "GTC"
+    );
+
+    results.orderResponse = JSON.stringify(orderResponse).slice(0, 300);
+    results.steps.push("Order submitted!");
+    results.success = true;
+
+    // If order went through, cancel it immediately to not risk money
+    if (orderResponse && (orderResponse.orderID || orderResponse.id)) {
+      const orderId = orderResponse.orderID || orderResponse.id;
+      results.steps.push(`Cancelling test order ${orderId}...`);
+      try {
+        const cancelResp = await state.clobClient.cancelOrder({ orderID: orderId });
+        results.cancelResponse = JSON.stringify(cancelResp).slice(0, 200);
+        results.steps.push("Order cancelled — test complete!");
+      } catch (cancelErr) {
+        results.steps.push(`Cancel error (order may have filled): ${cancelErr.message}`);
+      }
+    }
+
+    log(`TEST ORDER RESULT: ${JSON.stringify(results.orderResponse).slice(0, 100)}`, "live");
+
+  } catch (e) {
+    results.error = e.message;
+    results.stack = e.stack ? e.stack.split('\n').slice(0, 5) : [];
+    results.steps.push(`FAILED: ${e.message}`);
+    log(`TEST ORDER FAILED: ${e.message}`, "error");
+  }
+
+  res.json(results);
 });
 
 // Config update
