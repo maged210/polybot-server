@@ -25,6 +25,7 @@ const { JsonRpcProvider } = require("@ethersproject/providers");
 const fetch = (...args) => import("node-fetch").then(({ default: f }) => f(...args));
 const { ApexEngine, APEX_CONFIG } = require("./apex-strategy");
 const { NewsEngine } = require("./news-engine");
+const { FiveMinSniper } = require("./five-min-sniper");
 
 const app = express();
 app.use(cors());
@@ -975,6 +976,42 @@ const newsEngine = new NewsEngine({
 if (CONFIG.ANTHROPIC_API_KEY) {
   newsEngine.start(30000); // Check every 30 seconds
 }
+
+// ═══ 5-MINUTE BTC + ETH SNIPER ═══
+let sniper = null;
+
+function startSniper() {
+  if (sniper && sniper.running) return;
+  sniper = new FiveMinSniper({
+    clobClient: state.clobClient,
+    onLog: (msg, type) => log(msg, type || "info"),
+    onTrade: (trade) => {
+      // Record to state
+      state.trades.unshift({
+        id: `5m-${Date.now()}`,
+        market: `${trade.asset.toUpperCase()} 5M ${trade.side}`,
+        side: trade.side === "UP" ? "YES" : "NO",
+        price: trade.price,
+        amount: trade.cost,
+        shares: trade.shares,
+        strategy: "5M_SNIPER",
+        openedAt: trade.timestamp,
+        mode: state.mode,
+        orderId: trade.orderId,
+        slug: trade.slug,
+      });
+      if (state.trades.length > 500) state.trades = state.trades.slice(0, 500);
+      state.stats.dailyTrades++;
+    },
+    sendTelegram,
+  });
+  sniper.start();
+}
+
+function stopSniper() {
+  if (sniper) sniper.stop();
+}
+
 let apexInterval = null;
 let apexActive = false;
 
@@ -1139,6 +1176,7 @@ app.get("/api/state", (req, res) => {
       ...apex.getStatus(),
     },
     news: newsEngine.getStatus(),
+    sniper: sniper ? sniper.getStatus() : { running: false },
   });
 });
 
@@ -1206,6 +1244,7 @@ app.post("/api/bot/kill", (req, res) => {
   apexActive = false;
   if (botInterval) clearInterval(botInterval);
   if (apexInterval) clearInterval(apexInterval);
+  if (sniper) sniper.stop();
   log("🚨 KILL SWITCH ACTIVATED", "error");
   sendTelegram("🚨 KILL SWITCH — ALL TRADING HALTED");
   res.json({ ok: true, status: "killed" });
@@ -1229,6 +1268,21 @@ app.get("/api/apex/status", (req, res) => {
     ...status,
     config: APEX_CONFIG,
   });
+});
+
+// ── 5-MIN SNIPER ENDPOINTS ──
+app.post("/api/sniper/start", (req, res) => {
+  startSniper();
+  res.json({ ok: true, status: "sniper_started" });
+});
+
+app.post("/api/sniper/stop", (req, res) => {
+  stopSniper();
+  res.json({ ok: true, status: "sniper_stopped" });
+});
+
+app.get("/api/sniper/status", (req, res) => {
+  res.json(sniper ? sniper.getStatus() : { running: false });
 });
 
 // Mode switch
