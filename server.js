@@ -1043,13 +1043,29 @@ function startMarketMaker() {
     kalshiClient: kalshi,
     onLog: (msg, type) => log(msg, type || "info"),
     onTrade: (trade) => {
+      const upPrice = trade.upPrice || trade.spread || 0;
+      const downPrice = trade.downPrice || 0;
+      const shares = trade.shares || trade.contracts || 0;
+      const cost = (upPrice + downPrice) * shares || trade.cost || 0;
+      const spread = trade.spread || (1 - upPrice - downPrice) || 0;
+      const bothFilled = trade.upFilled && trade.downFilled;
+      const pnl = bothFilled ? spread * shares : 0;
+
       state.trades.unshift({
-        ...trade,
         id: `mm-${Date.now()}`,
-        market: trade.market || "Market Maker",
+        market: trade.market || `${(trade.platform || "?").toUpperCase()} MAKER`,
         strategy: trade.strategy || "MARKET_MAKER",
+        side: bothFilled ? "BOTH" : trade.upFilled ? "YES" : trade.downFilled ? "NO" : "BOTH",
+        amount: +cost.toFixed(2),
+        price: +(upPrice || 0).toFixed(2),
+        edge: +spread.toFixed(3),
+        result: bothFilled ? "WIN" : (trade.upFilled || trade.downFilled) ? "OPEN" : "PENDING",
+        pnl: +pnl.toFixed(2),
         mode: state.mode,
         openedAt: new Date(),
+        platform: trade.platform,
+        upFilled: trade.upFilled,
+        downFilled: trade.downFilled,
       });
       if (state.trades.length > 500) state.trades = state.trades.slice(0, 500);
     },

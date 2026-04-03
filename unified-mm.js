@@ -174,7 +174,9 @@ class UnifiedMarketMaker {
       market: `${asset.toUpperCase()} 5M MAKER`,
       side: "BOTH",
       upFilled: upResult?.filled, downFilled: downResult?.filled,
-      spread, shares: cfg.shares, mode: this.mode,
+      upPrice: cfg.bidUp, downPrice: cfg.bidDown,
+      spread, shares: cfg.shares, cost: (cfg.bidUp + cfg.bidDown) * cfg.shares,
+      mode: this.mode,
     });
   }
 
@@ -259,8 +261,11 @@ class UnifiedMarketMaker {
       strategy: "MM_KALSHI",
       market: opp.title || opp.ticker,
       side: "BOTH",
-      spread: opp.spread, netProfit,
-      contracts, mode: this.mode,
+      upFilled: yesResult?.filled, downFilled: noResult?.filled,
+      upPrice: cfg.bidYes, downPrice: cfg.bidNo,
+      spread: opp.spread, shares: contracts,
+      cost: (cfg.bidYes + cfg.bidNo) * contracts,
+      mode: this.mode,
     });
   }
 
