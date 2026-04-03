@@ -27,7 +27,6 @@ const { ApexEngine, APEX_CONFIG } = require("./apex-strategy");
 const { NewsEngine } = require("./news-engine");
 const { FiveMinSniper } = require("./five-min-sniper");
 const { TechnicalAnalysis } = require("./technical-analysis");
-const { MarketMaker } = require("./market-maker");
 const { KalshiClient } = require("./kalshi-client");
 const { UnifiedMarketMaker } = require("./unified-mm");
 const taEngine = new TechnicalAnalysis();
