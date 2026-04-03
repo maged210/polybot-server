@@ -27,6 +27,9 @@ const { ApexEngine, APEX_CONFIG } = require("./apex-strategy");
 const { NewsEngine } = require("./news-engine");
 const { FiveMinSniper } = require("./five-min-sniper");
 const { TechnicalAnalysis } = require("./technical-analysis");
+const { MarketMaker } = require("./market-maker");
+const { KalshiClient } = require("./kalshi-client");
+const { UnifiedMarketMaker } = require("./unified-mm");
 const taEngine = new TechnicalAnalysis();
 
 const app = express();
@@ -71,6 +74,11 @@ const CONFIG = {
 
   // Polygon RPC
   POLYGON_RPC: process.env.POLYGON_RPC || "https://polygon-rpc.com",
+
+  // Kalshi
+  KALSHI_EMAIL: process.env.KALSHI_EMAIL || "",
+  KALSHI_PASSWORD: process.env.KALSHI_PASSWORD || "",
+  KALSHI_DEMO: process.env.KALSHI_DEMO !== "false", // Default to demo mode
 };
 
 // ════════════════════════════════════════════════════════════
@@ -1014,6 +1022,48 @@ function stopSniper() {
   if (sniper) sniper.stop();
 }
 
+// ═══ MARKET MAKER (UNIFIED — Polymarket + Kalshi) ═══
+let mm = null;
+let kalshi = null;
+
+// Initialize Kalshi client if credentials exist
+if (CONFIG.KALSHI_EMAIL && CONFIG.KALSHI_PASSWORD) {
+  kalshi = new KalshiClient({
+    email: CONFIG.KALSHI_EMAIL,
+    password: CONFIG.KALSHI_PASSWORD,
+    demo: CONFIG.KALSHI_DEMO,
+    onLog: (msg, type) => log(msg, type || "info"),
+  });
+  kalshi.login().catch(() => log("Kalshi login deferred — will retry on MM start", "warn"));
+}
+
+function startMarketMaker() {
+  if (mm && mm.running) return;
+  mm = new UnifiedMarketMaker({
+    polyClobClient: state.clobClient,
+    kalshiClient: kalshi,
+    onLog: (msg, type) => log(msg, type || "info"),
+    onTrade: (trade) => {
+      state.trades.unshift({
+        ...trade,
+        id: `mm-${Date.now()}`,
+        market: trade.market || "Market Maker",
+        strategy: trade.strategy || "MARKET_MAKER",
+        mode: state.mode,
+        openedAt: new Date(),
+      });
+      if (state.trades.length > 500) state.trades = state.trades.slice(0, 500);
+    },
+    sendTelegram,
+    mode: state.mode,
+  });
+  mm.start();
+}
+
+function stopMarketMaker() {
+  if (mm) mm.stop();
+}
+
 let apexInterval = null;
 let apexActive = false;
 
@@ -1179,6 +1229,7 @@ app.get("/api/state", (req, res) => {
     },
     news: newsEngine.getStatus(),
     sniper: sniper ? sniper.getStatus() : { running: false },
+    mm: mm ? mm.getStatus() : { running: false },
   });
 });
 
@@ -1247,6 +1298,7 @@ app.post("/api/bot/kill", (req, res) => {
   if (botInterval) clearInterval(botInterval);
   if (apexInterval) clearInterval(apexInterval);
   if (sniper) sniper.stop();
+  if (mm) mm.stop();
   log("🚨 KILL SWITCH ACTIVATED", "error");
   sendTelegram("🚨 KILL SWITCH — ALL TRADING HALTED");
   res.json({ ok: true, status: "killed" });
@@ -1293,6 +1345,39 @@ app.get("/api/ta/:asset", async (req, res) => {
   if (!["btc", "eth"].includes(asset)) return res.status(400).json({ error: "Use btc or eth" });
   const analysis = await taEngine.analyze(asset);
   res.json(analysis);
+});
+
+// ── MARKET MAKER ENDPOINTS ──
+app.post("/api/mm/start", (req, res) => {
+  startMarketMaker();
+  res.json({ ok: true, status: "market_maker_started", mode: state.mode });
+});
+
+app.post("/api/mm/stop", (req, res) => {
+  stopMarketMaker();
+  res.json({ ok: true, status: "market_maker_stopped" });
+});
+
+app.get("/api/mm/status", (req, res) => {
+  res.json(mm ? mm.getStatus() : { running: false });
+});
+
+// Kalshi status
+app.get("/api/kalshi/status", async (req, res) => {
+  if (!kalshi) return res.json({ connected: false, message: "No Kalshi credentials. Add KALSHI_EMAIL and KALSHI_PASSWORD to env vars." });
+  const status = kalshi.getStatus();
+  let balance = null;
+  if (status.authenticated) {
+    balance = await kalshi.getBalance();
+  }
+  res.json({ ...status, balance });
+});
+
+// Kalshi opportunities
+app.get("/api/kalshi/opportunities", async (req, res) => {
+  if (!kalshi) return res.json({ error: "Kalshi not configured" });
+  const opps = await kalshi.findMakingOpportunities({ minVolume: 500 });
+  res.json({ count: opps.length, opportunities: opps.slice(0, 20) });
 });
 
 // Mode switch
